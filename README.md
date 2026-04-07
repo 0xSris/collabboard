@@ -1,103 +1,128 @@
 # CollabBoard
 
-A real-time collaborative whiteboard built from scratch — no third-party whiteboard SDKs. Multi-user canvas with shapes, freehand drawing, sticky notes, live cursors, and persistent rooms.
+> Real-time collaborative whiteboard — built from scratch, no third-party canvas SDKs.
 
-```
-client/          React + Vite + Canvas API + Zustand
-server/          Node.js + Express + Socket.io + SQLite
-shared/          TypeScript types shared between client and server
-```
-
-## Stack
-
-| Layer | Tech |
-|-------|------|
-| Frontend | React 18, TypeScript, Vite, CSS Modules |
-| Canvas | HTML5 Canvas API (raw, no libraries) |
-| State | Zustand |
-| Real-time | Socket.io (WebSocket) |
-| Sync | Last-write-wins CRDT per element |
-| Backend | Node.js, Express |
-| Database | SQLite (better-sqlite3) — zero infra, portable |
-| Auth | JWT (bcrypt, 30-day tokens) |
-| Data export | JSON download (full user data + canvas state) |
-
-## Quick Start
-
-### Prerequisites
-- Node.js 18+
-- npm 9+
-
-### 1. Install dependencies
-
-```bash
-npm run install:all
-```
-
-### 2. Configure server environment
-
-```bash
-cp server/.env.example server/.env
-# Edit server/.env and set a strong JWT_SECRET
-```
-
-### 3. Run development servers
-
-```bash
-npm run dev
-```
-
-This starts:
-- **Client** on http://localhost:5173
-- **Server** on http://localhost:3001
-
-### 4. Open in browser
-
-Navigate to http://localhost:5173, register an account, and create a board.
-
-To test real-time collaboration, open a second browser window (or incognito) and join the same board.
+CollabBoard is a multi-user whiteboard with live cursors, freehand drawing, shapes, sticky notes, and persistent rooms. The entire canvas engine is built on the raw HTML5 Canvas API. Conflict resolution uses a CRDT-lite last-write-wins model per element, keeping concurrent edits consistent without requiring a heavy sync library.
 
 ---
 
 ## Architecture
 
-### Real-time sync (CRDT-lite)
+```
+┌──────────────────────────────────────────────────────┐
+│                     React Client                     │
+│        Canvas API · Zustand · Socket.io-client       │
+└──────────────────────┬───────────────────────────────┘
+                       │ WebSocket (Socket.io)
+┌──────────────────────▼───────────────────────────────┐
+│                  Node.js Server                      │
+│           Express · Socket.io · JWT Auth             │
+│                                                      │
+│   ┌──────────────────────────────────────────────┐   │
+│   │         Real-time Sync Engine                │   │
+│   │   Last-write-wins CRDT per canvas element    │   │
+│   └──────────────────────┬───────────────────────┘   │
+│                          │                           │
+│   ┌──────────────────────▼───────────────────────┐   │
+│   │          SQLite (WAL mode, portable)         │   │
+│   └──────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────┘
 
-Each canvas element has a globally unique ID and a `updatedAt` timestamp. Conflict resolution uses last-write-wins per element — the server rejects an incoming update if its `updatedAt` is older than the stored version. This gives conflict-free concurrent edits for the common case (no two users editing the same element simultaneously).
+shared/   TypeScript types shared between client and server
+```
+
+---
+
+## Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, TypeScript, Vite, CSS Modules |
+| Canvas Engine | HTML5 Canvas API (raw — no libraries) |
+| State Management | Zustand |
+| Real-time | Socket.io (WebSocket) |
+| Conflict Resolution | Last-write-wins CRDT per element |
+| Backend | Node.js, Express |
+| Database | SQLite via `better-sqlite3` (WAL mode) |
+| Auth | JWT + bcrypt, 30-day tokens |
+| Data Export | Full JSON export (profile + rooms + canvas state) |
+
+---
+
+## Features
+
+- **No SDK dependencies** — canvas rendering built entirely on the HTML5 Canvas API
+- **Live collaboration** — real-time cursor presence and element sync across all connected users
+- **CRDT-lite sync** — last-write-wins conflict resolution per element; stale updates are rejected server-side
+- **Persistent rooms** — canvas state saved to SQLite, survives server restarts
+- **Full data export** — users can export their complete data as structured JSON at any time
+- **Zero-infra database** — single portable SQLite file, trivial to backup or migrate
+- **Monorepo with shared types** — TypeScript types shared between client and server via `shared/`
+
+---
+
+## Prerequisites
+
+- Node.js 18+
+- npm 9+
+
+---
+
+## Quick Start
+
+```bash
+git clone https://github.com/0xSris/collabboard.git
+cd collabboard
+
+# Install all workspace dependencies
+npm run install:all
+
+# Configure server environment
+cp server/.env.example server/.env
+# Edit server/.env and set a strong JWT_SECRET
+
+# Start client + server concurrently
+npm run dev
+```
+
+- **Client** → `http://localhost:5173`
+- **Server** → `http://localhost:3001`
+
+To test real-time collaboration, open a second browser window or incognito tab and join the same board.
+
+---
+
+## Real-time Sync
+
+Each canvas element carries a globally unique ID and an `updatedAt` timestamp. The server rejects any incoming update whose `updatedAt` is older than the stored version, ensuring concurrent edits converge without conflict.
 
 ```
 Client A ──upsert(el, t=100)──▶ Server ──broadcast──▶ Client B
-Client B ──upsert(el, t=99)───▶ Server (rejected: stale)
+Client B ──upsert(el, t=99)───▶ Server  (rejected: stale)
 ```
 
-Full Yjs CRDT can be layered in later for richer conflict resolution.
+Full Yjs CRDT can be layered in for richer conflict resolution if needed.
 
-### Socket events
+---
+
+## Socket Events
 
 | Event | Direction | Description |
-|-------|-----------|-------------|
-| `room:join` | C→S | Join a room, receive canvas init |
-| `canvas:init` | S→C | Full canvas snapshot on join |
-| `element:upsert` | C↔S | Create or update an element |
-| `element:delete` | C↔S | Delete an element |
-| `element:batch-upsert` | C↔S | Bulk sync (undo/redo) |
-| `cursor:move` | C→S→C | Live cursor position |
+|---|---|---|
+| `room:join` | C→S | Join a room, receive canvas snapshot |
+| `canvas:init` | S→C | Full canvas state on join |
+| `element:upsert` | C↔S | Create or update a canvas element |
+| `element:delete` | C↔S | Delete a canvas element |
+| `element:batch-upsert` | C↔S | Bulk sync for undo/redo |
+| `cursor:move` | C→S→C | Live cursor position broadcast |
 | `presence:update` | S→C | Connected users list |
-
-### Database
-
-SQLite with WAL mode. The `data/` directory is created automatically on first run. The database file (`collabboard.db`) is a single portable file — easy to backup or import.
-
-### Data export
-
-Every user can export their complete data (profile, rooms, canvas snapshots) as a structured JSON file from the dashboard. This file can be re-imported or used as a backup.
 
 ---
 
 ## Keyboard Shortcuts
 
 | Key | Action |
-|-----|--------|
+|---|---|
 | `V` | Select tool |
 | `H` | Pan tool |
 | `R` | Rectangle |
@@ -111,9 +136,9 @@ Every user can export their complete data (profile, rooms, canvas snapshots) as 
 | `Ctrl+Shift+Z` | Redo |
 | `Delete` / `Backspace` | Delete selected |
 | `Esc` | Deselect / cancel |
-| Double-click | Edit text/sticky |
+| Double-click | Edit text or sticky note |
 | Scroll | Pan canvas |
-| Ctrl+Scroll | Zoom |
+| `Ctrl` + Scroll | Zoom |
 
 ---
 
@@ -121,11 +146,11 @@ Every user can export their complete data (profile, rooms, canvas snapshots) as 
 
 ```
 collabboard/
-├── package.json              # Root monorepo (workspaces)
+├── package.json              # Root monorepo (npm workspaces)
 ├── client/
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── auth/         # Login & register pages
+│   │   │   ├── auth/         # Login and register pages
 │   │   │   ├── canvas/       # Board, Canvas, PresenceBar, PropertiesPanel
 │   │   │   ├── sidebar/      # Dashboard (room list)
 │   │   │   └── toolbar/      # Tool palette
@@ -135,15 +160,15 @@ collabboard/
 │   │   │   └── socket.ts     # Socket.io client singleton
 │   │   ├── store/
 │   │   │   ├── authStore.ts  # Auth state (persisted)
-│   │   │   └── canvasStore.ts# Canvas state + undo/redo
+│   │   │   └── canvasStore.ts# Canvas state + undo/redo stack
 │   │   └── styles/
 │   │       └── globals.css
 │   └── vite.config.ts
 ├── server/
 │   └── src/
-│       ├── index.ts          # Entry, Express + Socket.io setup
+│       ├── index.ts          # Entry — Express + Socket.io setup
 │       ├── lib/
-│       │   ├── database.ts   # SQLite init + helpers
+│       │   ├── database.ts   # SQLite init and query helpers
 │       │   └── socket.ts     # Real-time event handlers
 │       ├── middleware/
 │       │   └── auth.ts       # JWT middleware
@@ -157,9 +182,9 @@ collabboard/
 
 ---
 
-## Deployment (free tier)
+## Deployment
 
-### Fly.io (server)
+### Server — Fly.io
 
 ```bash
 fly launch
@@ -167,19 +192,19 @@ fly secrets set JWT_SECRET=<your-secret>
 fly deploy
 ```
 
-### Vercel / Netlify (client)
+### Client — Vercel / Netlify
 
 ```bash
 cd client && npm run build
 # Deploy the dist/ folder
-# Set VITE_API_URL env var to your Fly.io server URL
+# Set VITE_API_URL to your deployed server URL
 ```
 
 ---
 
-## Importing exported data
+## Data Export
 
-The JSON export format is:
+Every user can export their complete data from the dashboard as a structured JSON file:
 
 ```json
 {
@@ -187,8 +212,31 @@ The JSON export format is:
   "version": "1.0.0",
   "user": { "id": "...", "email": "...", "username": "..." },
   "rooms": [{ "id": "...", "name": "..." }],
-  "canvasData": [{ "roomId": "...", "roomName": "...", "canvasData": { ... } }]
+  "canvasData": [{ "roomId": "...", "roomName": "...", "canvasData": {} }]
 }
 ```
 
 This file is self-contained and can be used to migrate data, create backups, or seed a new instance.
+
+---
+
+## Roadmap
+
+- [ ] Yjs CRDT integration for richer conflict resolution
+- [ ] Image uploads onto the canvas
+- [ ] PDF export of board state
+- [ ] Guest access (no account required for read-only view)
+- [ ] Board templates
+- [ ] Mobile touch support
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.
+
+---
+
+## Author
+
+Built by [0xSris](https://github.com/0xSris).
