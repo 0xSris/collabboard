@@ -19,7 +19,7 @@ export function PropertiesPanel({ onElementChange }: Props) {
 
   function updateEl(patch: Partial<CanvasElement>) {
     if (!selected) return
-    const updated = { ...selected, ...patch, updatedAt: Date.now() }
+    const updated = { ...selected, ...patch, updatedAt: Date.now(), version: selected.version + 1 }
     useCanvasStore.getState().upsertElement(updated)
     onElementChange(updated)
   }
@@ -104,7 +104,7 @@ export function PropertiesPanel({ onElementChange }: Props) {
         <p className={styles.sectionTitle}>{selected.type}</p>
       </section>
 
-      {selected.type !== 'freehand' && selected.type !== 'arrow' && (
+      {selected.type !== 'freehand' && selected.type !== 'arrow' && selected.type !== 'line' && selected.type !== 'comment' && (
         <section className={styles.section}>
           <p className={styles.label}>Fill</p>
           <div className={styles.colorGrid}>
