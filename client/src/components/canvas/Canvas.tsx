@@ -1,209 +1,197 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
-import { useCanvasStore, type CanvasElement } from '../../store/canvasStore'
-import { renderElement, renderGrid, hitTest, screenToCanvas, getFreehandBounds } from '../../lib/renderer'
 import { nanoid } from 'nanoid'
+import { useCanvasStore, type CanvasElement } from '../../store/canvasStore'
+import { renderElement, renderGrid, hitTest, screenToCanvas, getFreehandBounds, elementInViewport } from '../../lib/renderer'
 import styles from './Canvas.module.css'
 
 interface CanvasProps {
   roomId: string
   userId: string
+  username?: string
   onElementChange: (el: CanvasElement) => void
   onElementDelete: (id: string) => void
   onCursorMove: (x: number, y: number) => void
   onBatchChange: (els: CanvasElement[]) => void
+  onCommentCreate?: (comment: { id: string; roomId: string; x: number; y: number; body: string }) => void
 }
 
-export function Canvas({ userId, onElementChange, onElementDelete, onCursorMove, onBatchChange }: CanvasProps) {
+type DragMode =
+  | { type: 'move'; ids: string[]; startX: number; startY: number; origins: Record<string, { x: number; y: number }> }
+  | { type: 'selectBox'; startX: number; startY: number; currentX: number; currentY: number }
+  | { type: 'resize'; id: string; handle: number; startX: number; startY: number; original: CanvasElement }
+  | null
+
+export function Canvas({ roomId, userId, username, onElementChange, onElementDelete, onCursorMove, onBatchChange, onCommentCreate }: CanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number>()
   const drawingRef = useRef<CanvasElement | null>(null)
-  const dragRef = useRef<{ startX: number; startY: number; elX: number; elY: number; id: string } | null>(null)
-  const resizeRef = useRef<{ handleIdx: number; el: CanvasElement; startX: number; startY: number } | null>(null)
+  const dragRef = useRef<DragMode>(null)
   const panRef = useRef<{ startX: number; startY: number; viewX: number; viewY: number } | null>(null)
   const isPanning = useRef(false)
   const textEditRef = useRef<{ el: CanvasElement; input: HTMLTextAreaElement } | null>(null)
-  const [textEditing, setTextEditing] = useState<string | null>(null)
   const cursorThrottle = useRef(0)
-
+  const [textEditing, setTextEditing] = useState<string | null>(null)
+  const [laser, setLaser] = useState<{ x: number; y: number; t: number } | null>(null)
   const store = useCanvasStore()
 
-  // ─── Render loop ───────────────────────────────────────────────────────────
   const render = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const ctx = canvas.getContext('2d')!
-    const { elements, selectedIds, view, presence } = useCanvasStore.getState()
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const state = useCanvasStore.getState()
 
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-    // Grid
-    renderGrid(ctx, view, canvas.width, canvas.height)
-
-    // Elements sorted by zIndex
-    const sorted = Array.from(elements.values()).sort((a, b) => a.zIndex - b.zIndex)
+    if (state.gridEnabled) renderGrid(ctx, state.view, canvas.width, canvas.height)
 
     ctx.save()
-    ctx.translate(view.x, view.y)
-    ctx.scale(view.zoom, view.zoom)
+    ctx.translate(state.view.x, state.view.y)
+    ctx.scale(state.view.zoom, state.view.zoom)
 
+    const sorted = Array.from(state.elements.values()).sort((a, b) => a.zIndex - b.zIndex)
     sorted.forEach(el => {
-      if (el.id === textEditing) return // skip while editing
-      renderElement(ctx, el, selectedIds.has(el.id))
+      if (el.id !== textEditing && elementInViewport(el, state.view, canvas.width, canvas.height)) {
+        renderElement(ctx, el, state.selectedIds.has(el.id))
+      }
     })
 
-    // In-progress drawing
-    if (drawingRef.current) {
-      renderElement(ctx, drawingRef.current, false)
-    }
-
-    // Remote cursors
-    presence.forEach(p => {
-      if (!p.cursor) return
-      drawCursor(ctx, p.cursor.x, p.cursor.y, p.color, p.username)
-    })
-
+    if (drawingRef.current) renderElement(ctx, drawingRef.current)
+    if (dragRef.current?.type === 'selectBox') drawSelectionBox(ctx, dragRef.current)
+    state.presence.forEach(p => drawCursor(ctx, p.cursor.x, p.cursor.y, p.color, p.username, p.activeTool))
+    if (laser && Date.now() - laser.t < 900) drawLaser(ctx, laser.x, laser.y)
     ctx.restore()
-  }, [textEditing])
+  }, [laser, textEditing])
 
   const scheduleRender = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current)
     rafRef.current = requestAnimationFrame(render)
   }, [render])
 
-  // Subscribe to store changes → re-render
   useEffect(() => {
     const unsub = useCanvasStore.subscribe(() => scheduleRender())
     scheduleRender()
     return () => { unsub(); if (rafRef.current) cancelAnimationFrame(rafRef.current) }
   }, [scheduleRender])
 
-  // ─── Resize observer ───────────────────────────────────────────────────────
   useEffect(() => {
-    const container = containerRef.current!
+    const container = containerRef.current
+    if (!container) return
     const observer = new ResizeObserver(() => {
-      const canvas = canvasRef.current!
-      canvas.width = container.clientWidth
-      canvas.height = container.clientHeight
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = Math.floor(container.clientWidth * dpr)
+      canvas.height = Math.floor(container.clientHeight * dpr)
+      canvas.style.width = `${container.clientWidth}px`
+      canvas.style.height = `${container.clientHeight}px`
+      const ctx = canvas.getContext('2d')
+      ctx?.setTransform(dpr, 0, 0, dpr, 0, 0)
       scheduleRender()
     })
     observer.observe(container)
     return () => observer.disconnect()
   }, [scheduleRender])
 
-  // ─── Keyboard shortcuts ────────────────────────────────────────────────────
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName
       if (tag === 'TEXTAREA' || tag === 'INPUT') return
+      const s = useCanvasStore.getState()
 
-      // Delete selected
-      if ((e.key === 'Delete' || e.key === 'Backspace') && store.selectedIds.size > 0) {
-        store.pushHistory()
-        store.selectedIds.forEach(id => {
-          store.deleteElement(id)
-          onElementDelete(id)
-        })
-        store.clearSelection()
+      if ((e.key === 'Delete' || e.key === 'Backspace') && s.selectedIds.size) {
+        e.preventDefault()
+        s.pushHistory()
+        Array.from(s.selectedIds).forEach(id => { s.deleteElement(id); onElementDelete(id) })
         return
       }
-
-      // Undo/redo
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
         e.preventDefault()
-        const els = store.undo()
+        const els = s.undo()
         if (els) onBatchChange(els)
         return
       }
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
         e.preventDefault()
-        const els = store.redo()
+        const els = s.redo()
         if (els) onBatchChange(els)
         return
       }
-
-      // Escape
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        const copies = s.duplicateSelected(userId)
+        if (copies.length) onBatchChange(copies)
+        return
+      }
       if (e.key === 'Escape') {
-        store.clearSelection()
+        s.clearSelection()
         finishTextEdit()
         return
       }
-
-      // Tool shortcuts
-      const toolMap: Record<string, any> = { v: 'select', r: 'rect', e: 'ellipse', a: 'arrow', p: 'freehand', s: 'sticky', t: 'text', h: 'pan' }
-      if (toolMap[e.key] && !e.metaKey && !e.ctrlKey) {
-        store.setTool(toolMap[e.key])
-      }
+      const toolMap: Record<string, any> = { v: 'select', h: 'pan', r: 'rect', e: 'ellipse', a: 'arrow', l: 'line', p: 'freehand', s: 'sticky', t: 'text', c: 'comment', x: 'eraser', k: 'laser' }
+      const tool = toolMap[e.key.toLowerCase()]
+      if (tool && !e.ctrlKey && !e.metaKey) s.setTool(tool)
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
-  }, [store, onElementDelete, onBatchChange])
+  }, [onBatchChange, onElementDelete, userId])
 
-  // ─── Zoom (wheel) ──────────────────────────────────────────────────────────
   useEffect(() => {
-    const canvas = canvasRef.current!
+    const canvas = canvasRef.current
+    if (!canvas) return
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       const rect = canvas.getBoundingClientRect()
-      const cx = e.clientX - rect.left
-      const cy = e.clientY - rect.top
-
+      const state = useCanvasStore.getState()
       if (e.ctrlKey || e.metaKey) {
-        const delta = e.deltaY > 0 ? 0.9 : 1.1
-        store.zoomTo(store.view.zoom * delta, cx, cy)
+        state.zoomTo(state.view.zoom * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX - rect.left, e.clientY - rect.top)
       } else {
-        store.setView({ x: store.view.x - e.deltaX, y: store.view.y - e.deltaY })
+        state.setView({ x: state.view.x - e.deltaX, y: state.view.y - e.deltaY })
       }
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
-  }, [store])
+  }, [])
 
-  // ─── Pointer events ────────────────────────────────────────────────────────
   function getCanvasPos(e: React.PointerEvent) {
     const rect = canvasRef.current!.getBoundingClientRect()
-    return screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, store.view)
+    return screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, useCanvasStore.getState().view)
   }
 
   function finishTextEdit() {
     if (!textEditRef.current) return
     const { el, input } = textEditRef.current
-    const text = input.value
     input.remove()
     textEditRef.current = null
     setTextEditing(null)
-
-    const updated = { ...el, text, updatedAt: Date.now() }
-    store.upsertElement(updated)
+    const updated = { ...el, text: input.value, updatedAt: Date.now(), version: el.version + 1 }
+    useCanvasStore.getState().upsertElement(updated)
     onElementChange(updated)
-    store.pushHistory()
+    useCanvasStore.getState().pushHistory()
   }
 
   function startTextEdit(el: CanvasElement) {
     finishTextEdit()
-    const canvas = canvasRef.current!
     const container = containerRef.current!
-
-    const { x: sx, y: sy } = { x: el.x * store.view.zoom + store.view.x, y: el.y * store.view.zoom + store.view.y }
-
+    const view = useCanvasStore.getState().view
     const textarea = document.createElement('textarea')
     textarea.value = el.text || ''
     textarea.className = styles.textEditArea
-    textarea.style.left = `${sx + 4}px`
-    textarea.style.top = `${sy + (el.type === 'sticky' ? 30 : 4)}px`
-    textarea.style.width = `${(el.width ?? 160) * store.view.zoom - 12}px`
-    textarea.style.height = `${(el.height ?? 160) * store.view.zoom - (el.type === 'sticky' ? 40 : 8)}px`
-    textarea.style.fontSize = `${(el.fontSize ?? 14) * store.view.zoom}px`
-
+    textarea.style.left = `${el.x * view.zoom + view.x + 8}px`
+    textarea.style.top = `${el.y * view.zoom + view.y + (el.type === 'sticky' ? 34 : 8)}px`
+    textarea.style.width = `${Math.max(120, (el.width ?? 180) * view.zoom - 16)}px`
+    textarea.style.height = `${Math.max(38, (el.height ?? 80) * view.zoom - (el.type === 'sticky' ? 44 : 12))}px`
+    textarea.style.fontSize = `${(el.fontSize ?? 14) * view.zoom}px`
     container.appendChild(textarea)
     textarea.focus()
     textarea.select()
-
     textarea.addEventListener('blur', finishTextEdit)
-    textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); finishTextEdit() }
+    textarea.addEventListener('keydown', event => {
+      if (event.key === 'Escape' || (event.key === 'Enter' && (event.metaKey || event.ctrlKey))) {
+        event.preventDefault()
+        finishTextEdit()
+      }
     })
-
     textEditRef.current = { el, input: textarea }
     setTextEditing(el.id)
   }
@@ -212,248 +200,259 @@ export function Canvas({ userId, onElementChange, onElementDelete, onCursorMove,
     if (e.button !== 0 && e.button !== 1) return
     canvasRef.current!.setPointerCapture(e.pointerId)
     const pos = getCanvasPos(e)
-    const { tool, elements, view } = store
+    const state = useCanvasStore.getState()
 
-    // Middle mouse / space pan
-    if (e.button === 1 || tool === 'pan' || (e.altKey)) {
+    if (e.button === 1 || state.tool === 'pan' || e.altKey || e.buttons === 4) {
       isPanning.current = true
-      panRef.current = { startX: e.clientX, startY: e.clientY, viewX: view.x, viewY: view.y }
+      panRef.current = { startX: e.clientX, startY: e.clientY, viewX: state.view.x, viewY: state.view.y }
       return
     }
 
-    // Select tool
-    if (tool === 'select') {
-      // Check handles first
-      const selected = Array.from(store.selectedIds)
-      if (selected.length === 1) {
-        const el = elements.get(selected[0])
-        // TODO: handle resize handles
-      }
+    if (state.tool === 'laser') {
+      setLaser({ x: pos.x, y: pos.y, t: Date.now() })
+      return
+    }
 
-      // Hit test elements (reverse zIndex order)
-      const sorted = Array.from(elements.values()).sort((a, b) => b.zIndex - a.zIndex)
-      const hit = sorted.find(el => hitTest(el, pos.x, pos.y, view.zoom))
-
+    if (state.tool === 'select') {
+      const sorted = Array.from(state.elements.values()).sort((a, b) => b.zIndex - a.zIndex)
+      const hit = sorted.find(el => hitTest(el, pos.x, pos.y, state.view.zoom))
       if (hit) {
-        if (!e.shiftKey) store.setSelected([hit.id])
-        else {
-          const s = new Set(store.selectedIds)
-          s.has(hit.id) ? s.delete(hit.id) : s.add(hit.id)
-          store.setSelected(Array.from(s))
-        }
-        dragRef.current = { startX: pos.x, startY: pos.y, elX: hit.x, elY: hit.y, id: hit.id }
+        const selected = state.selectedIds.has(hit.id) ? Array.from(state.selectedIds) : [hit.id]
+        if (e.shiftKey) {
+          const next = new Set(state.selectedIds)
+          next.has(hit.id) ? next.delete(hit.id) : next.add(hit.id)
+          state.setSelected(Array.from(next))
+        } else state.setSelected(selected)
+        const ids = Array.from(useCanvasStore.getState().selectedIds)
+        const origins = Object.fromEntries(ids.map(id => {
+          const el = useCanvasStore.getState().elements.get(id)!
+          return [id, { x: el.x, y: el.y }]
+        }))
+        state.pushHistory()
+        dragRef.current = { type: 'move', ids, startX: pos.x, startY: pos.y, origins }
       } else {
-        store.clearSelection()
+        state.clearSelection()
+        dragRef.current = { type: 'selectBox', startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y }
       }
       return
     }
 
-    // Eraser
-    if (tool === 'eraser') {
-      const sorted = Array.from(elements.values()).sort((a, b) => b.zIndex - a.zIndex)
-      const hit = sorted.find(el => hitTest(el, pos.x, pos.y, view.zoom))
+    if (state.tool === 'eraser') {
+      const hit = Array.from(state.elements.values()).sort((a, b) => b.zIndex - a.zIndex).find(el => hitTest(el, pos.x, pos.y, state.view.zoom))
       if (hit) {
-        store.pushHistory()
-        store.deleteElement(hit.id)
+        state.pushHistory()
+        state.deleteElement(hit.id)
         onElementDelete(hit.id)
       }
       return
     }
 
-    // Drawing tools
-    store.pushHistory()
-    const type = tool as CanvasElement['type']
-    const now = Date.now()
-    const base: CanvasElement = {
-      id: nanoid(10),
-      type,
+    state.pushHistory()
+    const type = state.tool === 'comment' ? 'comment' : state.tool
+    const base = state.createElement(type as CanvasElement['type'], userId, {
+      roomId,
       x: pos.x,
       y: pos.y,
-      width: 0,
-      height: 0,
-      color: type === 'sticky' ? '#2a2a1e' : store.fillColor,
-      strokeColor: store.strokeColor,
-      strokeWidth: store.strokeWidth,
-      fontSize: store.fontSize,
-      opacity: 1,
-      zIndex: store.getZIndex(),
-      createdBy: userId,
-      createdAt: now,
-      updatedAt: now,
-    }
-
+      width: type === 'sticky' ? 180 : type === 'text' ? 220 : type === 'comment' ? 1 : 0,
+      height: type === 'sticky' ? 170 : type === 'text' ? 50 : type === 'comment' ? 1 : 0,
+      text: type === 'sticky' ? 'New idea' : type === 'text' ? 'Text' : '',
+      authorName: username,
+    })
     if (type === 'freehand') base.points = [[pos.x, pos.y]]
-    if (type === 'sticky') { base.width = 160; base.height = 160; base.text = '' }
-
     drawingRef.current = base
-    store.setIsDrawing(true)
+    state.setIsDrawing(true)
   }
 
   function onPointerMove(e: React.PointerEvent) {
     const pos = getCanvasPos(e)
-
-    // Throttled cursor emit
+    const state = useCanvasStore.getState()
     const now = Date.now()
-    if (now - cursorThrottle.current > 40) {
+    if (now - cursorThrottle.current > 35) {
       onCursorMove(pos.x, pos.y)
       cursorThrottle.current = now
     }
+    if (state.tool === 'laser' && e.buttons === 1) setLaser({ x: pos.x, y: pos.y, t: now })
 
-    // Pan
     if (isPanning.current && panRef.current) {
-      const dx = e.clientX - panRef.current.startX
-      const dy = e.clientY - panRef.current.startY
-      store.setView({ x: panRef.current.viewX + dx, y: panRef.current.viewY + dy })
+      state.setView({ x: panRef.current.viewX + e.clientX - panRef.current.startX, y: panRef.current.viewY + e.clientY - panRef.current.startY })
       return
     }
-
-    // Drag selected element
-    if (dragRef.current) {
-      const { startX, startY, elX, elY, id } = dragRef.current
-      const dx = pos.x - startX
-      const dy = pos.y - startY
-      const el = store.elements.get(id)
-      if (!el) return
-      const updated = { ...el, x: elX + dx, y: elY + dy, updatedAt: Date.now() }
-      store.upsertElement(updated)
+    if (dragRef.current?.type === 'move') {
+      const dx = pos.x - dragRef.current.startX
+      const dy = pos.y - dragRef.current.startY
+      dragRef.current.ids.forEach(id => {
+        const el = state.elements.get(id)
+        const origin = dragRef.current?.type === 'move' ? dragRef.current.origins[id] : null
+        if (el && origin) state.upsertElement({ ...el, x: origin.x + dx, y: origin.y + dy, updatedAt: now, version: el.version + 1 })
+      })
+      return
+    }
+    if (dragRef.current?.type === 'selectBox') {
+      dragRef.current.currentX = pos.x
+      dragRef.current.currentY = pos.y
       scheduleRender()
       return
     }
-
-    // Drawing
-    if (!drawingRef.current || !store.isDrawing) return
+    if (!drawingRef.current || !state.isDrawing) return
     const el = drawingRef.current
-    const dx = pos.x - el.x
-    const dy = pos.y - el.y
-
-    if (el.type === 'freehand') {
-      drawingRef.current = { ...el, points: [...(el.points ?? []), [pos.x, pos.y]] }
-    } else {
-      drawingRef.current = { ...el, width: dx, height: dy }
-    }
+    if (el.type === 'freehand') drawingRef.current = { ...el, points: [...(el.points ?? []), [pos.x, pos.y]], updatedAt: now }
+    else if (el.type !== 'sticky' && el.type !== 'text' && el.type !== 'comment') drawingRef.current = { ...el, width: pos.x - el.x, height: pos.y - el.y, updatedAt: now }
     scheduleRender()
   }
 
-  function onPointerUp(e: React.PointerEvent) {
+  function onPointerUp() {
+    const state = useCanvasStore.getState()
     isPanning.current = false
     panRef.current = null
 
-    // Finish drag
-    if (dragRef.current) {
-      const el = store.elements.get(dragRef.current.id)
-      if (el) onElementChange(el)
+    if (dragRef.current?.type === 'move') {
+      const updates = dragRef.current.ids.map(id => state.elements.get(id)).filter(Boolean) as CanvasElement[]
+      onBatchChange(updates)
+      dragRef.current = null
+      return
+    }
+    if (dragRef.current?.type === 'selectBox') {
+      const box = dragRef.current
+      const left = Math.min(box.startX, box.currentX)
+      const right = Math.max(box.startX, box.currentX)
+      const top = Math.min(box.startY, box.currentY)
+      const bottom = Math.max(box.startY, box.currentY)
+      const ids = Array.from(state.elements.values()).filter(el => el.x >= left && el.x + (el.width ?? 1) <= right && el.y >= top && el.y + (el.height ?? 1) <= bottom).map(el => el.id)
+      state.setSelected(ids)
       dragRef.current = null
       return
     }
 
-    // Finish drawing
-    if (drawingRef.current && store.isDrawing) {
-      const el = drawingRef.current
+    if (drawingRef.current && state.isDrawing) {
+      const el = normalizeElement(drawingRef.current)
       drawingRef.current = null
-      store.setIsDrawing(false)
-
-      // Normalize rect/ellipse (negative width/height)
-      let finalEl = { ...el, updatedAt: Date.now() }
-      if ((el.type === 'rect' || el.type === 'ellipse' || el.type === 'arrow') && el.width !== undefined && el.height !== undefined) {
-        if (el.width < 0) { finalEl.x = el.x + el.width; finalEl.width = Math.abs(el.width) }
-        if (el.height < 0) { finalEl.y = el.y + el.height; finalEl.height = Math.abs(el.height) }
+      state.setIsDrawing(false)
+      state.upsertElement(el)
+      onElementChange(el)
+      state.setSelected([el.id])
+      if (el.type === 'sticky' || el.type === 'text') setTimeout(() => startTextEdit(el), 40)
+      if (el.type === 'comment') {
+        onCommentCreate?.({ id: nanoid(10), roomId, x: el.x, y: el.y, body: 'Review this area' })
       }
-
-      if (el.type === 'freehand') {
-        const bounds = getFreehandBounds(el)
-        finalEl.width = bounds.w
-        finalEl.height = bounds.h
-      }
-
-      // Minimum size guard
-      if ((finalEl.type === 'rect' || finalEl.type === 'ellipse') && (finalEl.width ?? 0) < 4 && (finalEl.height ?? 0) < 4) {
-        finalEl.width = 100; finalEl.height = 60
-      }
-
-      if (el.type === 'sticky') {
-        store.upsertElement(finalEl)
-        onElementChange(finalEl)
-        setTimeout(() => startTextEdit(finalEl), 50)
-      } else if (el.type === 'text') {
-        finalEl.width = 200; finalEl.height = 40
-        store.upsertElement(finalEl)
-        onElementChange(finalEl)
-        setTimeout(() => startTextEdit(finalEl), 50)
-      } else {
-        store.upsertElement(finalEl)
-        onElementChange(finalEl)
-        store.setSelected([finalEl.id])
-      }
-
-      store.setTool('select')
+      state.setTool('select')
     }
   }
 
-  function onDoubleClick(e: React.PointerEvent) {
-    const pos = getCanvasPos(e)
-    const sorted = Array.from(store.elements.values()).sort((a, b) => b.zIndex - a.zIndex)
-    const hit = sorted.find(el => hitTest(el, pos.x, pos.y, store.view.zoom))
-    if (hit && (hit.type === 'sticky' || hit.type === 'text' || hit.type === 'rect')) {
-      startTextEdit(hit)
+  function normalizeElement(el: CanvasElement) {
+    let finalEl = { ...el, updatedAt: Date.now(), version: el.version + 1 }
+    if (['rect', 'ellipse', 'arrow', 'line'].includes(el.type) && el.width !== undefined && el.height !== undefined) {
+      if (el.width < 0) { finalEl.x = el.x + el.width; finalEl.width = Math.abs(el.width) }
+      if (el.height < 0 && (el.type === 'rect' || el.type === 'ellipse')) { finalEl.y = el.y + el.height; finalEl.height = Math.abs(el.height) }
     }
+    if (el.type === 'freehand') {
+      const bounds = getFreehandBounds(el)
+      finalEl.width = bounds.w
+      finalEl.height = bounds.h
+    }
+    if ((finalEl.type === 'rect' || finalEl.type === 'ellipse') && Math.abs(finalEl.width ?? 0) < 4 && Math.abs(finalEl.height ?? 0) < 4) {
+      finalEl.width = 120
+      finalEl.height = 72
+    }
+    return finalEl
   }
 
-  // Cursor style
-  const getCursor = () => {
-    if (isPanning.current) return 'grabbing'
-    const { tool } = store
-    if (tool === 'pan') return 'grab'
-    if (tool === 'select') return 'default'
-    if (tool === 'eraser') return 'crosshair'
-    return 'crosshair'
+  function onDoubleClick(e: React.MouseEvent<HTMLCanvasElement>) {
+    const rect = canvasRef.current!.getBoundingClientRect()
+    const pos = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, useCanvasStore.getState().view)
+    const state = useCanvasStore.getState()
+    const hit = Array.from(state.elements.values()).sort((a, b) => b.zIndex - a.zIndex).find(el => hitTest(el, pos.x, pos.y, state.view.zoom))
+    if (hit && (hit.type === 'sticky' || hit.type === 'text')) startTextEdit(hit)
   }
+
+  const canvasWidth = containerRef.current?.clientWidth ?? 1
+  const canvasHeight = containerRef.current?.clientHeight ?? 1
 
   return (
     <div ref={containerRef} className={styles.container}>
       <canvas
         ref={canvasRef}
         className={styles.canvas}
-        style={{ cursor: getCursor() }}
+        style={{ cursor: store.tool === 'pan' ? 'grab' : store.tool === 'select' ? 'default' : 'crosshair' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onDoubleClick={onDoubleClick as any}
+        onDoubleClick={onDoubleClick}
       />
-      {/* Zoom indicator */}
+      <div className={styles.minimap} aria-hidden="true">
+        <div className={styles.minimapTitle}>Map</div>
+        {Array.from(store.elements.values()).slice(0, 80).map(el => (
+          <span key={el.id} className={styles.minimapItem} style={{
+            left: `${Math.max(4, Math.min(92, 50 + el.x / 28))}%`,
+            top: `${Math.max(12, Math.min(84, 50 + el.y / 28))}%`,
+            width: `${Math.max(4, Math.min(24, (el.width ?? 30) / 18))}%`,
+            height: `${Math.max(3, Math.min(18, (el.height ?? 20) / 18))}%`,
+            background: el.color === 'transparent' ? el.strokeColor : el.color,
+          }} />
+        ))}
+        <span className={styles.viewportRect} style={{
+          left: `${Math.max(0, Math.min(82, 50 - store.view.x / 34))}%`,
+          top: `${Math.max(10, Math.min(78, 50 - store.view.y / 34))}%`,
+          width: `${Math.max(12, Math.min(80, canvasWidth / 28 / store.view.zoom))}%`,
+          height: `${Math.max(10, Math.min(70, canvasHeight / 30 / store.view.zoom))}%`,
+        }} />
+      </div>
       <div className={styles.zoomBadge}>
+        <button onClick={() => store.zoomTo(store.view.zoom - 0.1)}>-</button>
         <span>{Math.round(store.view.zoom * 100)}%</span>
-        <button onClick={() => store.zoomTo(1)}>Reset</button>
+        <button onClick={() => store.zoomTo(store.view.zoom + 0.1)}>+</button>
+        <button onClick={() => store.resetView()}>Reset</button>
+        <button onClick={() => store.fitToContent(canvasWidth, canvasHeight)}>Fit</button>
       </div>
     </div>
   )
 }
 
-function drawCursor(ctx: CanvasRenderingContext2D, x: number, y: number, color: string, name: string) {
-  // Arrow cursor
+function drawSelectionBox(ctx: CanvasRenderingContext2D, box: Extract<DragMode, { type: 'selectBox' }>) {
+  const x = Math.min(box.startX, box.currentX)
+  const y = Math.min(box.startY, box.currentY)
+  const w = Math.abs(box.currentX - box.startX)
+  const h = Math.abs(box.currentY - box.startY)
+  ctx.fillStyle = 'rgba(37, 99, 235, 0.08)'
+  ctx.strokeStyle = 'rgba(37, 99, 235, 0.8)'
+  ctx.setLineDash([6, 4])
+  ctx.fillRect(x, y, w, h)
+  ctx.strokeRect(x, y, w, h)
+  ctx.setLineDash([])
+}
+
+function drawCursor(ctx: CanvasRenderingContext2D, x: number, y: number, color: string, name: string, tool: string) {
   ctx.save()
   ctx.fillStyle = color
-  ctx.strokeStyle = 'rgba(0,0,0,0.3)'
-  ctx.lineWidth = 1
   ctx.beginPath()
   ctx.moveTo(x, y)
-  ctx.lineTo(x + 10, y + 14)
-  ctx.lineTo(x + 4, y + 12)
-  ctx.lineTo(x + 2, y + 17)
-  ctx.lineTo(x, y + 13)
-  ctx.lineTo(x, y)
+  ctx.lineTo(x + 14, y + 18)
+  ctx.lineTo(x + 6, y + 15)
+  ctx.lineTo(x + 3, y + 22)
+  ctx.closePath()
   ctx.fill()
-  ctx.stroke()
-
-  // Label
-  ctx.fillStyle = color
   ctx.font = '11px DM Sans, sans-serif'
-  const w = ctx.measureText(name).width + 10
-  const lx = x + 12, ly = y + 18
-  ctx.beginPath()
-  ctx.roundRect(lx, ly, w, 18, 4)
-  ctx.fill()
-  ctx.fillStyle = 'white'
+  const label = `${name} - ${tool}`
+  const w = ctx.measureText(label).width + 12
+  ctx.fillRect(x + 14, y + 18, w, 20)
+  ctx.fillStyle = '#fff'
   ctx.textBaseline = 'middle'
-  ctx.fillText(name, lx + 5, ly + 9)
+  ctx.fillText(label, x + 20, y + 28)
+  ctx.restore()
+}
+
+function drawLaser(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  ctx.save()
+  const gradient = ctx.createRadialGradient(x, y, 2, x, y, 36)
+  gradient.addColorStop(0, 'rgba(239,68,68,0.9)')
+  gradient.addColorStop(1, 'rgba(239,68,68,0)')
+  ctx.fillStyle = gradient
+  ctx.beginPath()
+  ctx.arc(x, y, 36, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.strokeStyle = '#ef4444'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(x, y, 7, 0, Math.PI * 2)
+  ctx.stroke()
   ctx.restore()
 }

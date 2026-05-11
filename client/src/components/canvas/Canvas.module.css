@@ -30,7 +30,9 @@
 .zoomBadge {
   position: absolute;
   bottom: 16px;
-  right: 16px;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -58,3 +60,55 @@
 }
 
 .zoomBadge button:hover { color: var(--text); }
+
+.minimap {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  width: 178px;
+  height: 124px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  background: rgba(255, 255, 255, 0.86);
+  color: #111827;
+  border-radius: 8px;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+  overflow: hidden;
+}
+
+.minimapTitle {
+  position: absolute;
+  top: 7px;
+  left: 9px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: #6b7280;
+  z-index: 2;
+}
+
+.minimapItem,
+.viewportRect {
+  position: absolute;
+  display: block;
+  border-radius: 2px;
+}
+
+.minimapItem {
+  opacity: 0.85;
+}
+
+.viewportRect {
+  border: 1px solid #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+@media (max-width: 860px) {
+  .minimap {
+    display: none;
+  }
+
+  .zoomBadge {
+    left: auto;
+    right: 12px;
+    transform: none;
+  }
+}

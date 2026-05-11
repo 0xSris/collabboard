@@ -31,6 +31,9 @@ export function renderElement(ctx: CanvasRenderingContext2D, el: CanvasElement, 
     case 'arrow':
       drawArrow(ctx, el)
       break
+    case 'line':
+      drawLine(ctx, el)
+      break
     case 'freehand':
       drawFreehand(ctx, el)
       break
@@ -39,6 +42,9 @@ export function renderElement(ctx: CanvasRenderingContext2D, el: CanvasElement, 
       break
     case 'text':
       drawText(ctx, el)
+      break
+    case 'comment':
+      drawCommentPin(ctx, el)
       break
   }
 
@@ -67,7 +73,7 @@ export function renderElement(ctx: CanvasRenderingContext2D, el: CanvasElement, 
     ctx.setLineDash([])
 
     // Handles
-    if (el.type !== 'freehand' && el.type !== 'arrow') {
+    if (el.type !== 'freehand' && el.type !== 'arrow' && el.type !== 'line' && el.type !== 'comment') {
       drawSelectionHandles(ctx, el)
     }
   }
@@ -129,6 +135,13 @@ function drawArrow(ctx: CanvasRenderingContext2D, el: CanvasElement) {
   ctx.stroke()
 }
 
+function drawLine(ctx: CanvasRenderingContext2D, el: CanvasElement) {
+  ctx.beginPath()
+  ctx.moveTo(el.x, el.y)
+  ctx.lineTo(el.x + (el.width ?? 120), el.y + (el.height ?? 0))
+  ctx.stroke()
+}
+
 function drawFreehand(ctx: CanvasRenderingContext2D, el: CanvasElement) {
   const pts = el.points
   if (!pts || pts.length < 2) return
@@ -147,7 +160,7 @@ function drawFreehand(ctx: CanvasRenderingContext2D, el: CanvasElement) {
 function drawSticky(ctx: CanvasRenderingContext2D, el: CanvasElement) {
   const w = el.width ?? 160
   const h = el.height ?? 160
-  const bg = el.color || '#2a2a1e'
+  const bg = el.color || '#fff2a8'
 
   // Shadow
   ctx.shadowColor = 'rgba(0,0,0,0.4)'
@@ -169,7 +182,7 @@ function drawSticky(ctx: CanvasRenderingContext2D, el: CanvasElement) {
 
   // Text
   const text = el.text || ''
-  ctx.fillStyle = 'rgba(255,255,255,0.9)'
+  ctx.fillStyle = '#1f2937'
   ctx.font = `${el.fontSize ?? 13}px DM Sans, sans-serif`
   ctx.textBaseline = 'top'
 
@@ -192,6 +205,10 @@ function drawSticky(ctx: CanvasRenderingContext2D, el: CanvasElement) {
     }
   }
   if (line) ctx.fillText(line, el.x + padding, y)
+
+  ctx.fillStyle = 'rgba(31,41,55,0.58)'
+  ctx.font = '10px DM Sans, sans-serif'
+  ctx.fillText(el.authorName ? `@${el.authorName}` : 'sticky', el.x + 10, el.y + 9)
 }
 
 function drawText(ctx: CanvasRenderingContext2D, el: CanvasElement) {
@@ -218,6 +235,22 @@ function drawText(ctx: CanvasRenderingContext2D, el: CanvasElement) {
     }
   }
   if (line) ctx.fillText(line, el.x + padding, y)
+}
+
+function drawCommentPin(ctx: CanvasRenderingContext2D, el: CanvasElement) {
+  ctx.fillStyle = el.resolved ? '#94a3b8' : '#f97316'
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(el.x, el.y, 11, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.stroke()
+  ctx.fillStyle = '#ffffff'
+  ctx.font = 'bold 12px DM Sans, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText('?', el.x, el.y + 0.5)
+  ctx.textAlign = 'start'
 }
 
 function drawSelectionHandles(ctx: CanvasRenderingContext2D, el: CanvasElement) {
@@ -271,11 +304,14 @@ export function hitTest(el: CanvasElement, px: number, py: number, zoom = 1): bo
       const b = (el.height ?? 0) / 2 + pad
       return ((px - cx) ** 2) / a ** 2 + ((py - cy) ** 2) / b ** 2 <= 1
     }
-    case 'arrow': {
+    case 'arrow':
+    case 'line': {
       const x2 = el.x + (el.width ?? 0)
       const y2 = el.y + (el.height ?? 0)
       return distToSegment(px, py, el.x, el.y, x2, y2) < 10 / zoom
     }
+    case 'comment':
+      return Math.hypot(px - el.x, py - el.y) <= 14 / zoom
     default:
       return (
         px >= el.x - pad && px <= el.x + (el.width ?? 0) + pad &&
@@ -342,4 +378,19 @@ export function renderGrid(ctx: CanvasRenderingContext2D, view: { x: number; y: 
       }
     }
   }
+}
+
+export function elementInViewport(el: CanvasElement, view: { x: number; y: number; zoom: number }, w: number, h: number) {
+  const pad = 120 / view.zoom
+  const left = -view.x / view.zoom - pad
+  const top = -view.y / view.zoom - pad
+  const right = left + w / view.zoom + pad * 2
+  const bottom = top + h / view.zoom + pad * 2
+  const bounds = el.type === 'freehand' ? getFreehandBounds(el) : {
+    x: Math.min(el.x, el.x + (el.width ?? 0)),
+    y: Math.min(el.y, el.y + (el.height ?? 0)),
+    w: Math.abs(el.width ?? 24),
+    h: Math.abs(el.height ?? 24),
+  }
+  return bounds.x + bounds.w >= left && bounds.x <= right && bounds.y + bounds.h >= top && bounds.y <= bottom
 }
