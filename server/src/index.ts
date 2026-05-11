@@ -40,7 +40,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/rooms', roomsRouter);
 app.use('/api/export', exportRouter);
 
-app.get('/api/health', (_req, res) => {
+app.get(['/api/health', '/health'], (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -48,7 +48,7 @@ app.get('/api/health', (_req, res) => {
 setupSocketHandlers(io);
 
 httpServer.listen(PORT, () => {
-  console.log(`\n🚀 CollabBoard server running on http://localhost:${PORT}`);
-  console.log(`📡 WebSocket ready`);
-  console.log(`🗄️  Database initialized\n`);
+  console.log(`CollabBoard server running on http://localhost:${PORT}`);
+  console.log('WebSocket ready');
+  console.log('Database initialized');
 });

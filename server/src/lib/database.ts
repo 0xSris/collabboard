@@ -60,13 +60,61 @@ export function initDatabase(): void {
       id TEXT PRIMARY KEY,
       room_id TEXT NOT NULL UNIQUE,
       snapshot BLOB,
+      version INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS elements (
+      room_id TEXT NOT NULL,
+      element_id TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      deleted INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (room_id, element_id),
+      FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS comments (
+      id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      element_id TEXT,
+      x REAL NOT NULL,
+      y REAL NOT NULL,
+      body TEXT NOT NULL,
+      author_id TEXT NOT NULL,
+      author_name TEXT NOT NULL,
+      replies TEXT NOT NULL DEFAULT '[]',
+      resolved INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+      FOREIGN KEY (author_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS snapshots (
+      id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
     );
 
     CREATE INDEX IF NOT EXISTS idx_rooms_created_by ON rooms(created_by);
     CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_elements_room_updated ON elements(room_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_elements_room_deleted ON elements(room_id, deleted);
+    CREATE INDEX IF NOT EXISTS idx_comments_room_resolved ON comments(room_id, resolved);
   `);
 
-  console.log(`✅ Database ready at ${DB_PATH}`);
+  try {
+    database.prepare('ALTER TABLE canvas_snapshots ADD COLUMN version INTEGER NOT NULL DEFAULT 0').run();
+  } catch {
+    // Existing databases already have the column.
+  }
+
+  console.log(`Database ready at ${DB_PATH}`);
 }
