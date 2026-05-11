@@ -1,242 +1,192 @@
 # CollabBoard
 
-> Real-time collaborative whiteboard — built from scratch, no third-party canvas SDKs.
+CollabBoard is a production-style real-time collaborative whiteboard built from scratch with the raw HTML5 Canvas API and Socket.io. The resume angle is the engine: multi-user presence, live cursors, CRDT-lite element synchronization, undo/redo, persistent rooms, comments, sticky notes, templates, export/import, and a polished editor shell.
 
-CollabBoard is a multi-user whiteboard with live cursors, freehand drawing, shapes, sticky notes, and persistent rooms. The entire canvas engine is built on the raw HTML5 Canvas API. Conflict resolution uses a CRDT-lite last-write-wins model per element, keeping concurrent edits consistent without requiring a heavy sync library.
-
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│                     React Client                     │
-│        Canvas API · Zustand · Socket.io-client       │
-└──────────────────────┬───────────────────────────────┘
-                       │ WebSocket (Socket.io)
-┌──────────────────────▼───────────────────────────────┐
-│                  Node.js Server                      │
-│           Express · Socket.io · JWT Auth             │
-│                                                      │
-│   ┌──────────────────────────────────────────────┐   │
-│   │         Real-time Sync Engine                │   │
-│   │   Last-write-wins CRDT per canvas element    │   │
-│   └──────────────────────┬───────────────────────┘   │
-│                          │                           │
-│   ┌──────────────────────▼───────────────────────┐   │
-│   │          SQLite (WAL mode, portable)         │   │
-│   └──────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────┘
-
-shared/   TypeScript types shared between client and server
-```
-
----
+No third-party whiteboard or canvas SDKs are used.
 
 ## Stack
 
-| Layer | Technology |
-|---|---|
-| Frontend | React 18, TypeScript, Vite, CSS Modules |
-| Canvas Engine | HTML5 Canvas API (raw — no libraries) |
-| State Management | Zustand |
-| Real-time | Socket.io (WebSocket) |
-| Conflict Resolution | Last-write-wins CRDT per element |
-| Backend | Node.js, Express |
-| Database | SQLite via `better-sqlite3` (WAL mode) |
-| Auth | JWT + bcrypt, 30-day tokens |
-| Data Export | Full JSON export (profile + rooms + canvas state) |
+| Layer | Tech |
+| --- | --- |
+| Client | React 18, TypeScript, Vite, CSS Modules |
+| Canvas | Raw HTML5 Canvas API |
+| State | Zustand |
+| Realtime | Socket.io |
+| Server | Node.js, Express |
+| Database | SQLite, better-sqlite3, WAL mode |
+| Auth | JWT plus bcrypt |
+| Data | JSON import/export, PNG canvas export |
 
----
+## Product Features
 
-## Features
+- Infinite-style canvas workspace with pan, zoom, grid toggle, minimap, fit-to-content, and reset view.
+- Professional editor UX with board header, floating toolbar, right properties rail, presence avatars, command palette, shortcut help, comments, and sync debug panel.
+- Canvas tools: select, pan, rectangle, ellipse, arrow, line, freehand pen, text, sticky note, eraser, comment pin, and laser pointer.
+- Shape operations: drag to create, select, multi-select box, drag selected elements, duplicate, delete, bring forward, send backward, align, style, opacity, and text/sticky editing.
+- Realtime collaboration: authenticated room join, live cursors, active tool indicator, presence updates, queued offline ops, reconnect replay, ack/reject sync handling.
+- Sticky notes and comments: colors, author metadata, comment pins, unresolved count, and resolve flow.
+- Room dashboard: recent boards, collaborators, element counts, templates, duplicate board, delete board, and data export.
+- Export/import: room JSON export, PNG export, import JSON into an existing room, and full account export.
 
-- **No SDK dependencies** — canvas rendering built entirely on the HTML5 Canvas API
-- **Live collaboration** — real-time cursor presence and element sync across all connected users
-- **CRDT-lite sync** — last-write-wins conflict resolution per element; stale updates are rejected server-side
-- **Persistent rooms** — canvas state saved to SQLite, survives server restarts
-- **Full data export** — users can export their complete data as structured JSON at any time
-- **Zero-infra database** — single portable SQLite file, trivial to backup or migrate
-- **Monorepo with shared types** — TypeScript types shared between client and server via `shared/`
+## Architecture
 
----
-
-## Prerequisites
-
-- Node.js 18+
-- npm 9+
-
----
-
-## Quick Start
-
-```bash
-git clone https://github.com/0xSris/collabboard.git
-cd collabboard
-
-# Install all workspace dependencies
-npm run install:all
-
-# Configure server environment
-cp server/.env.example server/.env
-# Edit server/.env and set a strong JWT_SECRET
-
-# Start client + server concurrently
-npm run dev
+```text
+client/          React + Vite + Zustand + raw Canvas renderer
+server/          Express + Socket.io + SQLite repositories
+shared/          TypeScript type contracts
 ```
 
-- **Client** → `http://localhost:5173`
-- **Server** → `http://localhost:3001`
+The hot rendering path stays outside React. Canvas state lives in Zustand, while pointer events mutate a local element map and schedule requestAnimationFrame redraws. The renderer supports viewport culling so large boards avoid drawing offscreen elements.
 
-To test real-time collaboration, open a second browser window or incognito tab and join the same board.
+## Realtime Sync
 
----
+CollabBoard uses a last-write-wins CRDT-lite model per element:
 
-## Real-time Sync
-
-Each canvas element carries a globally unique ID and an `updatedAt` timestamp. The server rejects any incoming update whose `updatedAt` is older than the stored version, ensuring concurrent edits converge without conflict.
-
-```
-Client A ──upsert(el, t=100)──▶ Server ──broadcast──▶ Client B
-Client B ──upsert(el, t=99)───▶ Server  (rejected: stale)
-```
-
-Full Yjs CRDT can be layered in for richer conflict resolution if needed.
-
----
+- Every element has `id`, `roomId`, `type`, geometry, style, `createdBy`, `updatedBy`, `createdAt`, `updatedAt`, and `version`.
+- Clients optimistically apply local operations and enqueue them.
+- The server rejects stale updates when the incoming version/timestamp is older than the stored element.
+- Accepted updates are persisted to SQLite, acknowledged to the sender, and broadcast to other room members.
+- Batch updates are used for undo/redo, duplicated selections, and multi-element movement.
 
 ## Socket Events
 
-| Event | Direction | Description |
-|---|---|---|
-| `room:join` | C→S | Join a room, receive canvas snapshot |
-| `canvas:init` | S→C | Full canvas state on join |
-| `element:upsert` | C↔S | Create or update a canvas element |
-| `element:delete` | C↔S | Delete a canvas element |
-| `element:batch-upsert` | C↔S | Bulk sync for undo/redo |
-| `cursor:move` | C→S→C | Live cursor position broadcast |
-| `presence:update` | S→C | Connected users list |
+| Event | Direction | Purpose |
+| --- | --- | --- |
+| `room:join` | Client to server | Securely join a board room |
+| `canvas:init` | Server to client | Initial elements, comments, and room version |
+| `element:upsert` | Both | Create or update one element |
+| `element:delete` | Both | Delete one element |
+| `element:batch-upsert` | Both | Sync multi-element changes |
+| `cursor:move` | Client to server | Update cursor and active tool |
+| `presence:update` | Server to client | Connected user presence |
+| `comment:create` | Both | Create a comment thread |
+| `comment:resolve` | Both | Resolve a comment thread |
+| `room:snapshot` | Server to client | Broadcast current room version |
+| `sync:ack` | Server to client | Accepted operation acknowledgement |
+| `sync:reject` | Server to client | Stale or invalid operation rejection |
 
----
+## Database Schema
+
+SQLite runs in WAL mode. Core tables:
+
+- `users`: account, password hash, cursor color.
+- `rooms`: board metadata and owner.
+- `room_members`: room access.
+- `elements`: per-element JSON payloads with indexed room, element id, version, updated time, and deleted state.
+- `comments`: board comments and threaded replies payload.
+- `canvas_snapshots`: latest compact room snapshot and version.
+- `snapshots`: checkpoint history for future restore/version history workflows.
+
+## Local Setup
+
+```bash
+npm run install:all
+npm run dev
+```
+
+Client: http://localhost:5173  
+Server: http://localhost:3001  
+Health: http://localhost:3001/health
+
+Open two browser sessions, register/login, join the same room, and move the cursor or draw shapes to test collaboration.
 
 ## Keyboard Shortcuts
 
-| Key | Action |
-|---|---|
-| `V` | Select tool |
-| `H` | Pan tool |
+| Shortcut | Action |
+| --- | --- |
+| `V` | Select |
+| `H` | Pan |
 | `R` | Rectangle |
 | `E` | Ellipse |
 | `A` | Arrow |
+| `L` | Line |
 | `P` | Freehand pen |
 | `T` | Text |
 | `S` | Sticky note |
+| `C` | Comment pin |
+| `K` | Laser pointer |
 | `X` | Eraser |
+| `Ctrl+D` | Duplicate selected |
 | `Ctrl+Z` | Undo |
-| `Ctrl+Shift+Z` | Redo |
-| `Delete` / `Backspace` | Delete selected |
-| `Esc` | Deselect / cancel |
-| Double-click | Edit text or sticky note |
-| Scroll | Pan canvas |
-| `Ctrl` + Scroll | Zoom |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
+| `Ctrl+K` | Command palette |
+| `?` | Shortcut overlay |
+| `Delete` | Delete selected |
+| `Ctrl+Scroll` | Zoom |
+| `Scroll` | Pan |
 
----
+## Export Format
 
-## Project Structure
-
-```
-collabboard/
-├── package.json              # Root monorepo (npm workspaces)
-├── client/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── auth/         # Login and register pages
-│   │   │   ├── canvas/       # Board, Canvas, PresenceBar, PropertiesPanel
-│   │   │   ├── sidebar/      # Dashboard (room list)
-│   │   │   └── toolbar/      # Tool palette
-│   │   ├── lib/
-│   │   │   ├── api.ts        # HTTP client
-│   │   │   ├── renderer.ts   # Canvas drawing functions
-│   │   │   └── socket.ts     # Socket.io client singleton
-│   │   ├── store/
-│   │   │   ├── authStore.ts  # Auth state (persisted)
-│   │   │   └── canvasStore.ts# Canvas state + undo/redo stack
-│   │   └── styles/
-│   │       └── globals.css
-│   └── vite.config.ts
-├── server/
-│   └── src/
-│       ├── index.ts          # Entry — Express + Socket.io setup
-│       ├── lib/
-│       │   ├── database.ts   # SQLite init and query helpers
-│       │   └── socket.ts     # Real-time event handlers
-│       ├── middleware/
-│       │   └── auth.ts       # JWT middleware
-│       └── routes/
-│           ├── auth.ts       # /api/auth/*
-│           ├── rooms.ts      # /api/rooms/*
-│           └── export.ts     # /api/export/*
-└── shared/
-    └── types.ts              # Shared TypeScript types
-```
-
----
-
-## Deployment
-
-### Server — Fly.io
-
-```bash
-fly launch
-fly secrets set JWT_SECRET=<your-secret>
-fly deploy
-```
-
-### Client — Vercel / Netlify
-
-```bash
-cd client && npm run build
-# Deploy the dist/ folder
-# Set VITE_API_URL to your deployed server URL
-```
-
----
-
-## Data Export
-
-Every user can export their complete data from the dashboard as a structured JSON file:
+Full account export returns:
 
 ```json
 {
-  "exportedAt": "2024-01-01T00:00:00.000Z",
+  "exportedAt": "2026-05-11T00:00:00.000Z",
   "version": "1.0.0",
   "user": { "id": "...", "email": "...", "username": "..." },
-  "rooms": [{ "id": "...", "name": "..." }],
-  "canvasData": [{ "roomId": "...", "roomName": "...", "canvasData": {} }]
+  "rooms": [{ "id": "...", "name": "...", "createdBy": "..." }],
+  "snapshots": [
+    {
+      "roomId": "...",
+      "roomVersion": 12,
+      "elements": [],
+      "comments": [],
+      "updatedAt": "..."
+    }
+  ]
 }
 ```
 
-This file is self-contained and can be used to migrate data, create backups, or seed a new instance.
+Board-level JSON import accepts an object with an `elements` array and optional `comments` array.
 
----
+## Deployment Guide
 
-## Roadmap
+1. Set `JWT_SECRET` to a strong private value.
+2. Set `CLIENT_URL` on the server to the deployed client origin.
+3. Build both workspaces:
 
-- [ ] Yjs CRDT integration for richer conflict resolution
-- [ ] Image uploads onto the canvas
-- [ ] PDF export of board state
-- [ ] Guest access (no account required for read-only view)
-- [ ] Board templates
-- [ ] Mobile touch support
+```bash
+npm run build
+```
 
----
+4. Deploy `server` as a Node service with persistent disk for `server/data`.
+5. Deploy `client/dist` as a static site and proxy `/api` plus `/socket.io` to the server.
 
-## License
+## Tests And Verification
 
-MIT — see [LICENSE](LICENSE) for details.
+Current verification:
 
----
+```bash
+npm run build
+```
 
-## Author
+Recommended next test targets:
 
-Built by [0xSris](https://github.com/0xSris).
+- Auth register/login and protected route rejection.
+- Room creation, listing, duplicate, and delete.
+- Export payload shape and import sanitization.
+- Last-write-wins conflict rejection.
+- Element upsert/delete repository behavior.
+- Canvas store undo/redo.
+- Renderer smoke tests for each element type.
+- Socket event validation for malformed payloads.
+
+## Sample Commit Messages
+
+- `feat: build raw canvas collaboration engine`
+- `feat: add crdt-lite socket synchronization`
+- `feat: add board templates and dashboard actions`
+- `feat: add sync debug panel and offline operation queue`
+- `docs: document CollabBoard architecture and export format`
+
+## Release Checklist
+
+- Build passes for client and server.
+- Register/login works.
+- Create a templated room.
+- Draw and edit shapes, sticky notes, and comments.
+- Open a second browser session and verify live cursors/presence.
+- Disconnect and reconnect to verify queued operation replay.
+- Export JSON and PNG.
+- Import JSON into a room.
+- Confirm SQLite data persists after server restart.
