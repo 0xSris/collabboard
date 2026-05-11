@@ -44,8 +44,10 @@ export const api = {
   },
   rooms: {
     list: () => request<any[]>('/rooms'),
-    create: (name: string) => request<any>('/rooms', { method: 'POST', body: JSON.stringify({ name }) }),
+    create: (name: string, template?: string) => request<any>('/rooms', { method: 'POST', body: JSON.stringify({ name, template }) }),
     get: (id: string) => request<any>(`/rooms/${id}`),
+    update: (id: string, name: string) => request<any>(`/rooms/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+    duplicate: (id: string) => request<any>(`/rooms/${id}/duplicate`, { method: 'POST' }),
     delete: (id: string) => request<any>(`/rooms/${id}`, { method: 'DELETE' }),
   },
   export: {

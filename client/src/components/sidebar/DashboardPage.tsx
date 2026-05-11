@@ -2,17 +2,29 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../../store/authStore'
 import { api } from '../../lib/api'
-import { Plus, LogOut, Download, Trash2, ArrowRight, Users, Clock } from 'lucide-react'
+import { Plus, LogOut, Download, Trash2, ArrowRight, Users, Clock, Copy, FileJson } from 'lucide-react'
 import styles from './DashboardPage.module.css'
 
 interface Room {
   id: string
   name: string
   creator_name: string
+  created_by: string
   created_at: string
   updated_at: string
   member_count: number
+  element_count?: number
+  collaborator_names?: string
 }
+
+const TEMPLATES = [
+  ['brainstorm', 'Brainstorm'],
+  ['sprint-retro', 'Sprint retro'],
+  ['user-journey', 'User journey'],
+  ['flowchart', 'Flowchart'],
+  ['architecture', 'Architecture'],
+  ['kanban', 'Kanban'],
+]
 
 export function DashboardPage() {
   const navigate = useNavigate()
@@ -21,6 +33,7 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const [template, setTemplate] = useState('brainstorm')
   const [showCreate, setShowCreate] = useState(false)
   const [exporting, setExporting] = useState(false)
 
@@ -33,7 +46,7 @@ export function DashboardPage() {
     if (!newName.trim()) return
     setCreating(true)
     try {
-      const room = await api.rooms.create(newName.trim())
+      const room = await api.rooms.create(newName.trim(), template)
       setRooms(r => [room, ...r])
       setNewName('')
       setShowCreate(false)
@@ -54,6 +67,27 @@ export function DashboardPage() {
     } catch (err: any) {
       alert(err.message)
     }
+  }
+
+  async function duplicateRoom(id: string, e: React.MouseEvent) {
+    e.stopPropagation()
+    try {
+      const room = await api.rooms.duplicate(id)
+      setRooms(r => [room, ...r])
+    } catch (err: any) {
+      alert(err.message)
+    }
+  }
+
+  function exportRoom(room: Room, e: React.MouseEvent) {
+    e.stopPropagation()
+    const payload = JSON.stringify(room, null, 2)
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${room.name}.room.json`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   async function exportData() {
@@ -153,6 +187,19 @@ export function DashboardPage() {
                   autoFocus
                   maxLength={60}
                 />
+                <div className={styles.templateGrid}>
+                  {TEMPLATES.map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className={styles.templateBtn}
+                      data-active={template === id}
+                      onClick={() => setTemplate(id)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 <div className={styles.modalActions}>
                   <button type="button" className={styles.cancelBtn} onClick={() => setShowCreate(false)}>Cancel</button>
                   <button type="submit" className={styles.confirmBtn} disabled={creating || !newName.trim()}>
@@ -214,6 +261,12 @@ export function DashboardPage() {
                           <Trash2 size={13} />
                         </button>
                       )}
+                      <button className={styles.deleteBtn} onClick={(e) => duplicateRoom(room.id, e)} title="Duplicate board">
+                        <Copy size={13} />
+                      </button>
+                      <button className={styles.deleteBtn} onClick={(e) => exportRoom(room, e)} title="Export board metadata">
+                        <FileJson size={13} />
+                      </button>
                       <ArrowRight size={14} className={styles.arrow} />
                     </div>
                   </div>
@@ -221,6 +274,10 @@ export function DashboardPage() {
                     <span className={styles.metaItem}>
                       <Users size={11} />
                       {room.member_count}
+                    </span>
+                    <span className={styles.metaItem}>
+                      <FileJson size={11} />
+                      {room.element_count ?? 0}
                     </span>
                     <span className={styles.metaItem}>
                       <Clock size={11} />
